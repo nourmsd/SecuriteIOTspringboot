@@ -16,7 +16,7 @@ import java.io.IOException;
 public class OtaController {
 
     // Current firmware version
-    private static final String FIRMWARE_VERSION = "1.0.0";
+    private static final String FIRMWARE_VERSION = "1.0.0"; // change to new version
 
     // Path to the firmware file
     private static final String FIRMWARE_PATH = "firmware/firmware.bin";
