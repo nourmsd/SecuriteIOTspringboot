@@ -5,47 +5,68 @@ import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.security.*;
+import java.security.KeyFactory;
+import java.security.PrivateKey;
+import java.security.Signature;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.Base64;
+
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 
 @RestController
 public class OtaController {
 
-    // -----------------------------------------------------------------
-    //  Configuration (change only these when you release a new build)
-    // -----------------------------------------------------------------
-    private static final String FIRMWARE_VERSION = "1.0.0";          // bump when new firmware
-    private static final String FIRMWARE_PATH    = "firmware/firmware.ino.bin"; // Arduino output
-    private static final String PRIVATE_KEY_PATH = "keys/private.pem";
+    private static final String FIRMWARE_PATH = "firmware/main_ota_https_led.ino.bin";
+    private static final String VERSION_PATH = "firmware/version.txt";
 
-    // -----------------------------------------------------------------
-    //  1. Firmware version
-    // -----------------------------------------------------------------
-    @GetMapping("/ota/version")
-    public ResponseEntity<String> getVersion() {
-        return ResponseEntity.ok(FIRMWARE_VERSION);
+    // --------------------------
+    // HELPER: read version file
+    // --------------------------
+    private String readVersion() {
+        File f = new File(VERSION_PATH);
+        if (!f.exists()) return "1.0";
+        try {
+            return new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8).trim();
+        } catch (Exception e) {
+            return "1.0";
+        }
     }
 
-    // -----------------------------------------------------------------
-    //  2. Plain firmware binary (for OTA)
-    // -----------------------------------------------------------------
+    // --------------------------
+    // PUBLIC: ESP32 uses this WITHOUT KEY
+    // --------------------------
+    @GetMapping("/ota/version")
+    public ResponseEntity<String> getVersion(
+            @RequestParam(name = "current", required = false) String currentVersion) {
+
+        String serverVersion = readVersion();
+
+        if (currentVersion == null) {
+            return ResponseEntity.badRequest().body("Missing current version");
+        }
+
+        if (currentVersion.trim().equals(serverVersion.trim())) {
+            return ResponseEntity.ok("UP_TO_DATE");
+        }
+
+        return ResponseEntity.ok(serverVersion);
+    }
+
+    // --------------------------
+    // PROTECTED: /ota/firmware
+    // --------------------------
     @GetMapping("/ota/firmware")
     public ResponseEntity<Resource> getFirmware() throws IOException {
         File file = new File(FIRMWARE_PATH);
-        if (!file.exists()) {
-            return ResponseEntity.notFound().build();
-        }
+        if (!file.exists()) return ResponseEntity.notFound().build();
 
         InputStreamResource resource = new InputStreamResource(new FileInputStream(file));
+
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=firmware.bin")
                 .contentLength(file.length())
@@ -53,45 +74,39 @@ public class OtaController {
                 .body(resource);
     }
 
-    // -----------------------------------------------------------------
-    //  3. ECDSA signature of the firmware (SHA256withECDSA)
-    // -----------------------------------------------------------------
-    @GetMapping("/ota/firmware.sig")
-    public ResponseEntity<Resource> getFirmwareSignature() throws Exception {
-        PrivateKey privateKey = loadPrivateKey();
-        byte[] firmwareBytes = Files.readAllBytes(Paths.get(FIRMWARE_PATH));
-
-        Signature ecdsa = Signature.getInstance("SHA256withECDSA");
-        ecdsa.initSign(privateKey);
-        ecdsa.update(firmwareBytes);
-        byte[] signature = ecdsa.sign();
-
-        // Write to a temporary file (auto-deleted on JVM exit)
-        File temp = File.createTempFile("firmware", ".sig");
-        Files.write(temp.toPath(), signature);
-        temp.deleteOnExit();
-
-        InputStreamResource resource = new InputStreamResource(new FileInputStream(temp));
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=firmware.sig")
-                .contentLength(signature.length)
-                .contentType(MediaType.APPLICATION_OCTET_STREAM)
-                .body(resource);
-    }
-
-    // -----------------------------------------------------------------
-    //  Helper: load EC private key from PEM file
-    // -----------------------------------------------------------------
-    private PrivateKey loadPrivateKey() throws Exception {
-        byte[] keyBytes = Files.readAllBytes(Paths.get(PRIVATE_KEY_PATH));
-        String pem = new String(keyBytes)
-                .replace("-----BEGIN PRIVATE KEY-----", "")
-                .replace("-----END PRIVATE KEY-----", "")
-                .replaceAll("\\s+", "");
-
-        byte[] decoded = Base64.getDecoder().decode(pem);
-        PKCS8EncodedKeySpec spec = new PKCS8EncodedKeySpec(decoded);
-        KeyFactory kf = KeyFactory.getInstance("EC");
+    private PrivateKey loadPrivateKey(String filePath) throws Exception {
+        String key = new String(Files.readAllBytes(Paths.get(filePath)))
+                .replaceAll("-----\\w+ PRIVATE KEY-----", "")
+                .replaceAll("\\s", "");
+        byte[] keyBytes = Base64.getDecoder().decode(key);
+        PKCS8EncodedKeySpec spec = new PKCS8EncodedKeySpec(keyBytes);
+        KeyFactory kf = KeyFactory.getInstance("RSA");
         return kf.generatePrivate(spec);
+    }
+    // --------------------------
+    // PROTECTED: /ota/signature
+    // --------------------------
+    @GetMapping("/ota/signature")
+    public ResponseEntity<String> getSignature() {
+        try {
+            File fw = new File(FIRMWARE_PATH);
+            if (!fw.exists()) return ResponseEntity.notFound().build();
+
+            byte[] firmwareBytes = Files.readAllBytes(fw.toPath());
+
+            Signature signature = Signature.getInstance("SHA256withRSA");
+            PrivateKey privateKey = loadPrivateKey("PrivateKey/private.pem"); // path inside your project
+            signature.initSign(privateKey);
+            signature.update(firmwareBytes);
+
+            byte[] sigBytes = signature.sign();
+            String base64Sig = Base64.getEncoder().encodeToString(sigBytes);
+
+            return ResponseEntity.ok(base64Sig);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.internalServerError().body("");
+        }
     }
 }
