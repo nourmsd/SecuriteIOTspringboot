@@ -58,7 +58,7 @@ public class OtaController {
     // -----------------------------------------------------------------
     @GetMapping("/ota/firmware.sig")
     public ResponseEntity<Resource> getFirmwareSignature() throws Exception {
-        PrivateKey privateKey = loadPrivateKey(PRIVATE_KEY_PATH);
+        PrivateKey privateKey = loadPrivateKey();
         byte[] firmwareBytes = Files.readAllBytes(Paths.get(FIRMWARE_PATH));
 
         Signature ecdsa = Signature.getInstance("SHA256withECDSA");
@@ -82,8 +82,8 @@ public class OtaController {
     // -----------------------------------------------------------------
     //  Helper: load EC private key from PEM file
     // -----------------------------------------------------------------
-    private PrivateKey loadPrivateKey(String path) throws Exception {
-        byte[] keyBytes = Files.readAllBytes(Paths.get(path));
+    private PrivateKey loadPrivateKey() throws Exception {
+        byte[] keyBytes = Files.readAllBytes(Paths.get(PRIVATE_KEY_PATH));
         String pem = new String(keyBytes)
                 .replace("-----BEGIN PRIVATE KEY-----", "")
                 .replace("-----END PRIVATE KEY-----", "")
