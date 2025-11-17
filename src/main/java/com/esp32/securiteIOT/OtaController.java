@@ -23,7 +23,7 @@ import java.security.MessageDigest;
 @RestController
 public class OtaController {
     
-    private static final String FIRMWARE_PATH = "firmware/firmware.bin";
+    private static final String FIRMWARE_PATH = "firmware/firmware.enc";
     private static final String VERSION_PATH = "firmware/version.txt";
 
     // --------------------------

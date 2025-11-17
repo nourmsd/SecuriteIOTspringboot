@@ -5,11 +5,21 @@
 #include <mbedtls/base64.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/aes.h>
 
-#include "config.h" // contains ssid, password, serverUrl, endpoints, serverPublicKey, firmwarePublicKey
+#include "config.h" // ssid, password, serverUrl, endpoints, serverPublicKey, firmwarePublicKey, aesKeyHex, aesIvHex
 
 const int ledPin = 2;
-int blinkDelay = 500; // default blink delay
+int blinkDelay = 500; // LED blink interval
+
+// ----------------------
+// Hex string → byte array
+// ----------------------
+void hexToBytes(const char* hexStr, uint8_t* bytes, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        sscanf(hexStr + 2*i, "%2hhx", &bytes[i]);
+    }
+}
 
 // ----------------------
 // Verify firmware signature
@@ -41,12 +51,41 @@ bool verifyFirmwareSignature(uint8_t* firmware, size_t firmware_len, const char*
 }
 
 // ----------------------
-// WiFi setup
+// Decrypt AES-128-CBC firmware
+// ----------------------
+bool decryptFirmware(uint8_t* encData, size_t encSize, uint8_t* &decData, size_t &decSize) {
+    uint8_t key[16], iv[16];
+    hexToBytes(aesKeyHex, key, 16);
+    hexToBytes(aesIvHex, iv, 16);
+
+    if (encSize % 16 != 0) {
+        Serial.println("Encrypted firmware size not multiple of 16!");
+        return false;
+    }
+
+    decData = new uint8_t[encSize];
+    decSize = encSize;
+
+    mbedtls_aes_context ctx;
+    mbedtls_aes_init(&ctx);
+    mbedtls_aes_setkey_dec(&ctx, key, 128);
+
+    uint8_t iv_copy[16];
+    memcpy(iv_copy, iv, 16);
+
+    int ret = mbedtls_aes_crypt_cbc(&ctx, MBEDTLS_AES_DECRYPT, encSize, iv_copy, encData, decData);
+    mbedtls_aes_free(&ctx);
+
+    return ret == 0;
+}
+
+// ----------------------
+// Wi-Fi connect
 // ----------------------
 void setupWiFi() {
     Serial.print("Connecting to WiFi");
     WiFi.begin(ssid, password);
-    while(WiFi.status() != WL_CONNECTED) {
+    while (WiFi.status() != WL_CONNECTED) {
         delay(500);
         Serial.print(".");
     }
@@ -54,7 +93,7 @@ void setupWiFi() {
 }
 
 // ----------------------
-// Download file via HTTPS
+// Download file from server
 // ----------------------
 bool downloadFile(const String& url, uint8_t* &data, size_t &size, WiFiClientSecure &client) {
     HTTPClient https;
@@ -80,7 +119,7 @@ bool downloadFile(const String& url, uint8_t* &data, size_t &size, WiFiClientSec
 }
 
 // ----------------------
-// Perform OTA
+// Perform OTA update
 // ----------------------
 bool performOTA(uint8_t* firmware, size_t size) {
     if (!Update.begin(size)) { Serial.println("Not enough space for OTA"); return false; }
@@ -112,10 +151,11 @@ void setup() {
 
     setupWiFi();
 
-    // Check server version
     WiFiClientSecure client;
-    client.setInsecure();  // for testing
+    client.setInsecure();
+    //client.setCACert(serverPublicKey); // validate server certificate
 
+    // Check server version
     String currentVersion = "1.0";
     String versionURL = String(serverUrl) + String(versionEndpoint) + "?current=" + currentVersion;
 
@@ -133,10 +173,50 @@ void setup() {
     }
     https.end();
 
-    // For debugging: **skip OTA** to prevent restart
+    // OTA only if new version available
     if(serverVersion != "UP_TO_DATE") {
-        Serial.println("New version available, but OTA skipped for debug.");
-        // performOTA(...) // COMMENTED for now
+        Serial.println("New version available. Starting secure OTA...");
+
+        // 1️⃣ Download encrypted firmware
+        uint8_t* encFirmware = nullptr;
+        size_t encSize = 0;
+        String firmwareURL = String(serverUrl) + String(firmwareEndpoint);
+        if (!downloadFile(firmwareURL, encFirmware, encSize, client)) {
+            Serial.println("Firmware download failed");
+            return;
+        }
+
+        // 2️⃣ Decrypt firmware
+        uint8_t* firmware = nullptr;
+        size_t fwSize = 0;
+        if (!decryptFirmware(encFirmware, encSize, firmware, fwSize)) {
+            Serial.println("Firmware decryption failed");
+            delete[] encFirmware;
+            return;
+        }
+        delete[] encFirmware;
+
+        // 3️⃣ Download signature
+        uint8_t* sig = nullptr;
+        size_t sigSize = 0;
+        String sigURL = String(serverUrl) + String(signatureEndpoint);
+        if (!downloadFile(sigURL, sig, sigSize, client)) {
+            Serial.println("Signature download failed");
+            delete[] firmware;
+            return;
+        }
+        sig[sigSize] = 0; // null-terminate
+
+        // 4️⃣ Verify signature
+        if (verifyFirmwareSignature(firmware, fwSize, (char*)sig)) {
+            Serial.println("Signature verified, performing OTA...");
+            performOTA(firmware, fwSize);
+        } else {
+            Serial.println("Invalid signature, aborting OTA");
+        }
+
+        delete[] firmware;
+        delete[] sig;
     }
 
     adjustLED(serverVersion);
